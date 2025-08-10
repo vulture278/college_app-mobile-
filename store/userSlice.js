@@ -1,10 +1,9 @@
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
 import {
   FIREBASE_AUTH,
   FIREBASE_DB,
   FIREBASE_REALTIME_DB
-  
 } from "../FirebaseConfig";
 import {
   collection,
@@ -15,9 +14,29 @@ import {
   query,
   setDoc,
   where,
+  Timestamp,
+  addDoc
 } from "firebase/firestore";
 import { sendPasswordResetEmail } from "firebase/auth";
 import { ref, get } from "firebase/database";
+
+// Helper function to convert Firebase data to serializable format
+const convertFirebaseDataToSerializable = (data) => {
+  const serializedData = {};
+  
+  for (const [key, value] of Object.entries(data)) {
+    if (value instanceof Timestamp) {
+      serializedData[key] = value.toDate().toISOString();
+    } else if (value && typeof value === 'object' && value.toDate) {
+      // Handle Timestamp-like objects
+      serializedData[key] = value.toDate().toISOString();
+    } else {
+      serializedData[key] = value;
+    }
+  }
+  
+  return serializedData;
+};
 
 export const loginUser = createAsyncThunk(
   "user/loginUser",
@@ -39,11 +58,11 @@ export const fetchRealtimeData = createAsyncThunk(
   "user/fetchRealtimeData",
   async (_, { rejectWithValue }) => {
     try {
-      const databaseRef = ref(FIREBASE_REALTIME_DB, "college-app-data/users"); // Reference to your Realtime Database path
-      const snapshot = await get(databaseRef); // Fetch data from the Realtime Database
+      const databaseRef = ref(FIREBASE_REALTIME_DB, "college-app-data/users");
+      const snapshot = await get(databaseRef);
 
       if (snapshot.exists()) {
-        return snapshot.val(); // Return the data if it exists
+        return snapshot.val();
       } else {
         return rejectWithValue("No data found in the database.");
       }
@@ -53,55 +72,192 @@ export const fetchRealtimeData = createAsyncThunk(
   }
 );
 
+// FIXED: Corrected uploadUserData as a proper async thunk
+// Fixed CSV upload - create Firebase Auth account first, then use UID
 export const uploadUserData = createAsyncThunk(
   "users/uploadUserData",
-  async (userData, { rejectWithValue }) => {
+  async ({ userData, password }, { rejectWithValue }) => {
     try {
-      const usersCollection = collection(FIREBASE_DB, "users"); // Reference to the "users" collection
-      const userDocRef = doc(usersCollection, userData.rollNo); // Use rollNo as the document ID
-      const userDocSnapshot = await getDoc(userDocRef);
+      // Check if user document already exists
+      const existingUserRef = doc(FIREBASE_DB, "users", userData.rollNo);
+      const existingUserDoc = await getDoc(existingUserRef);
 
-      if (!userDocSnapshot.exists()) {
-        // If document does not already exist, upload it
-        await setDoc(userDocRef, userData);
-        return `Uploaded: ${userData.username}`;
+      if (existingUserDoc.exists()) {
+        const existingData = existingUserDoc.data();
+        console.log(`User exists with uid: ${existingData.uid}`);
+        
+        // If password is provided, create Firebase Auth account
+        if (password) {
+          const userCredential = await createUserWithEmailAndPassword(
+            FIREBASE_AUTH, 
+            userData.email, 
+            password
+          );
+          
+          const firebaseAuthUID = userCredential.user.uid;
+          
+          // Update the existing uid field with Firebase Auth UID
+          await updateDoc(existingUserRef, {
+            uid: firebaseAuthUID, // Replace existing uid
+            isAuthenticated: true,
+            authenticationDate: Timestamp.now(),
+            authenticationFlow: 'csv-upload',
+            lastUpdated: Timestamp.now()
+          });
+          
+          return {
+            message: `Authentication added to ${userData.username}`,
+            firebaseUID: firebaseAuthUID
+          };
+        }
+        
+        return {
+          message: `User ${userData.username} already exists - no authentication added`
+        };
+        
       } else {
-        return `Document for Roll No: ${userData.rollNo} already exists. Skipping...`;
+        // Create new user document
+        let firebaseAuthUID = null;
+        
+        if (password) {
+          const userCredential = await createUserWithEmailAndPassword(
+            FIREBASE_AUTH, 
+            userData.email, 
+            password
+          );
+          firebaseAuthUID = userCredential.user.uid;
+        }
+        
+        const userDocumentData = {
+          email: userData.email,
+          username: userData.username,
+          rollNo: userData.rollNo,
+          uid: firebaseAuthUID || userData.uid, // Use Firebase UID or existing uid
+          // ... other fields
+          isAuthenticated: !!firebaseAuthUID,
+          createdAt: Timestamp.now()
+        };
+
+        await setDoc(existingUserRef, userDocumentData);
+        
+        return {
+          message: `Created user: ${userData.username}`,
+          firebaseUID: firebaseAuthUID
+        };
       }
     } catch (error) {
-      console.error("Error uploading data to Firestore:", error);
-      return rejectWithValue("Failed to upload user data");
+      return rejectWithValue(`Failed to process: ${error.message}`);
     }
   }
 );
 
+
+
+// Proper timestamp handling - getUser fetches by Firebase UID
 export const getUser = createAsyncThunk(
   "user/getUser",
   async (uid, { rejectWithValue }) => {
     try {
+      console.log('🔍 Fetching user by UID:', uid);
       const userDoc = await getDoc(doc(FIREBASE_DB, "users", uid));
       if (userDoc.exists()) {
         const userData = userDoc.data();
+        const serializedData = convertFirebaseDataToSerializable(userData);
+        
+        console.log('✅ User found:', serializedData.username);
         return {
-          userEmail: userData.email,
-          ...userData,
-          createdAt: userData.createdAt.toDate().toISOString(),
+          userEmail: serializedData.email,
+          uid: uid, // Document ID IS the Firebase UID
+          ...serializedData,
         };
       } else {
+        console.warn('❌ No user document found for UID:', uid);
         return rejectWithValue("User not found");
       }
     } catch (error) {
+      console.error('❌ Error fetching user:', error);
       return rejectWithValue(error.message);
     }
   }
 );
 
+// export const getUser = createAsyncThunk(
+//   "user/getUser",
+//   async (firebaseUID, { rejectWithValue }) => {
+//     try {
+//       console.log('🔍 Fetching user by Firebase UID:', firebaseUID);
+      
+//       // Query by the uid field (which now contains Firebase Auth UID)
+//       const userQuery = query(
+//         collection(FIREBASE_DB, "users"),
+//         where("uid", "==", firebaseUID)
+//       );
+//       const querySnapshot = await getDocs(userQuery);
+
+//       if (!querySnapshot.empty) {
+//         const userDoc = querySnapshot.docs[0];
+//         const userData = userDoc.data();
+//         const serializedData = convertFirebaseDataToSerializable(userData);
+        
+//         console.log('✅ User found:', serializedData.username);
+//         return {
+//           userEmail: serializedData.email,
+//           uid: firebaseUID,
+//           documentId: userDoc.id,
+//           ...serializedData,
+//         };
+//       } else {
+//         return rejectWithValue("User not found");
+//       }
+//     } catch (error) {
+//       return rejectWithValue(error.message);
+//     }
+//   }
+// );
+
+// export const getUser = createAsyncThunk(
+//   "user/getUser",
+//   async (firebaseUID, { rejectWithValue }) => {
+//     try {
+//       console.log('🔍 Fetching user by Firebase UID field:', firebaseUID);
+      
+//       // Query by uid field, not document ID
+//       const userQuery = query(
+//         collection(FIREBASE_DB, "users"),
+//         where("uid", "==", firebaseUID)
+//       );
+//       const querySnapshot = await getDocs(userQuery);
+
+//       if (!querySnapshot.empty) {
+//         const userDoc = querySnapshot.docs[0];
+//         const userData = userDoc.data();
+//         const serializedData = convertFirebaseDataToSerializable(userData);
+        
+//         console.log('✅ User found:', serializedData.username);
+//         return {
+//           userEmail: serializedData.email,
+//           uid: firebaseUID, // Firebase Auth UID
+//           documentId: userDoc.id, // Original document ID (rollNo)
+//           ...serializedData,
+//         };
+//       } else {
+//         console.warn('❌ No user found with UID:', firebaseUID);
+//         return rejectWithValue("User not found");
+//       }
+//     } catch (error) {
+//       console.error('❌ Error fetching user:', error);
+//       return rejectWithValue(error.message);
+//     }
+//   }
+// );
+
+
 export const deleteUser = createAsyncThunk(
-  "user/deleteProfessor",
-  async (professorId, { rejectWithValue }) => {
+  "user/deleteUser",
+  async (userId, { rejectWithValue }) => {
     try {
-      await deleteDoc(doc(FIREBASE_DB, "users", professorId));
-      return professorId;
+      await deleteDoc(doc(FIREBASE_DB, "users", userId));
+      return userId;
     } catch (error) {
       return rejectWithValue(error.message);
     }
@@ -113,14 +269,22 @@ export const updateUser = createAsyncThunk(
   async ({ uid, userData }, thunkAPI) => {
     try {
       const userRef = doc(FIREBASE_DB, "users", uid);
-      await setDoc(userRef, userData, { merge: true });
-      return userData;
+      
+      // Ensure we don't add redundant firebaseUid field
+      const cleanUserData = { ...userData };
+      delete cleanUserData.firebaseUid; // Remove if accidentally included
+      
+      await setDoc(userRef, cleanUserData, { merge: true });
+      
+      // Return serialized data
+      return convertFirebaseDataToSerializable(cleanUserData);
     } catch (error) {
       return thunkAPI.rejectWithValue(error.message);
     }
   }
 );
 
+// Fixed: Proper timestamp handling in getProfessors
 export const getProfessors = createAsyncThunk(
   "user/getProfessors",
   async (_, { rejectWithValue }) => {
@@ -138,8 +302,8 @@ export const getProfessors = createAsyncThunk(
       const professors = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        const { createdAt, ...rest } = data;
-        professors.push({ id: doc.id, ...rest });
+        const serializedData = convertFirebaseDataToSerializable(data);
+        professors.push({ id: doc.id, ...serializedData });
       });
 
       return professors;
@@ -149,10 +313,12 @@ export const getProfessors = createAsyncThunk(
   }
 );
 
+// Fixed: Proper timestamp handling in getStudents
 export const getStudents = createAsyncThunk(
   "user/getStudents",
   async (_, { rejectWithValue }) => {
     try {
+      console.log('🔍 Fetching students from Firestore...');
       const studentQuery = query(
         collection(FIREBASE_DB, "users"),
         where("designation", "==", "Student")
@@ -162,18 +328,29 @@ export const getStudents = createAsyncThunk(
       const students = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        const { createdAt, ...rest } = data;
-        students.push({ id: doc.id, ...rest });
+        const serializedData = convertFirebaseDataToSerializable(data);
+        
+        // Ensure required fields are present and valid
+        if (serializedData.email && serializedData.username) {
+          students.push({ 
+            id: doc.id, // Document ID (Firebase UID)
+            ...serializedData 
+          });
+        } else {
+          console.warn('⚠️ Student missing required fields:', doc.id, serializedData);
+        }
       });
 
+      console.log('✅ Students fetched successfully:', students.length);
       return students;
     } catch (error) {
+      console.error('❌ Error fetching students:', error);
       return rejectWithValue(error.message);
     }
   }
 );
 
-// Fetch Office Assistants
+// Fixed: Proper timestamp handling in getStaff
 export const getStaff = createAsyncThunk(
   "user/getStaff",
   async (_, { rejectWithValue }) => {
@@ -187,8 +364,8 @@ export const getStaff = createAsyncThunk(
       const staff = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        const { createdAt, ...rest } = data;
-        staff.push({ id: doc.id, ...rest });
+        const serializedData = convertFirebaseDataToSerializable(data);
+        staff.push({ id: doc.id, ...serializedData });
       });
 
       return staff;
@@ -198,6 +375,7 @@ export const getStaff = createAsyncThunk(
   }
 );
 
+// Fixed: Proper timestamp handling in getVFaculties
 export const getVFaculties = createAsyncThunk(
   "user/getVFaculties",
   async (_, { rejectWithValue }) => {
@@ -211,8 +389,8 @@ export const getVFaculties = createAsyncThunk(
       const vFaculties = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        const { createdAt, ...rest } = data;
-        vFaculties.push({ id: doc.id, ...rest });
+        const serializedData = convertFirebaseDataToSerializable(data);
+        vFaculties.push({ id: doc.id, ...serializedData });
       });
 
       return vFaculties;
@@ -222,6 +400,7 @@ export const getVFaculties = createAsyncThunk(
   }
 );
 
+// Fixed: Proper timestamp handling in getAllUsers
 export const getAllUsers = createAsyncThunk(
   "user/getAllUsers",
   async (_, { rejectWithValue }) => {
@@ -232,8 +411,8 @@ export const getAllUsers = createAsyncThunk(
       const users = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
-        const { createdAt, ...rest } = data;
-        users.push({ id: doc.id, ...rest });
+        const serializedData = convertFirebaseDataToSerializable(data);
+        users.push({ id: doc.id, ...serializedData });
       });
 
       return users;
@@ -256,22 +435,32 @@ export const sendResetEmail = createAsyncThunk(
   }
 );
 
+// Fixed: addUser with clean document structure
 export const addUser = createAsyncThunk(
   "user/addUser",
-  async ({ userData }, { rejectWithValue }) => {
+  async ({ userData, firebaseUid }, { rejectWithValue }) => {
     try {
       const defaultProfilePic =
         "https://img.freepik.com/free-vector/illustration-businessman_53876-5856.jpg?w=740&t=st=1721141254~exp=1721141854~hmac=16b7be7a26efb621a8073b1e8204f34be34595f0d723d5c8ae9279435c66a468";
 
-      // Check if profilePic is provided, otherwise use default
       const profilePic = userData.photoURL || defaultProfilePic;
 
-      const userRef = doc(FIREBASE_DB, "users", userData.uid);
-      await setDoc(userRef, {
+      // Use Firebase UID as document ID, not userData.uid
+      const userRef = doc(FIREBASE_DB, "users", firebaseUid);
+      const userDataToSave = {
         ...userData,
         photoURL: profilePic,
-      });
-      return userData;
+        createdAt: Timestamp.now(),
+        // ❌ NO firebaseUid field needed
+      };
+      
+      await setDoc(userRef, userDataToSave);
+      
+      // Return serialized data with document ID
+      return {
+        id: firebaseUid,
+        ...convertFirebaseDataToSerializable(userDataToSave)
+      };
     } catch (error) {
       return rejectWithValue(error.message);
     }
@@ -302,12 +491,14 @@ export const fetchUserDegrees = createAsyncThunk(
       const querySnapshot = await getDocs(q);
       const degrees = querySnapshot.docs.map((doc) => {
         const data = doc.data();
+        const serializedData = convertFirebaseDataToSerializable(data);
+        
         return {
           id: doc.id,
-          ...data,
-          createdAt: data.createdAt.toDate().toISOString(),
-          startYear: data.startYear.toDate().getFullYear(),
-          endYear: data.endYear.toDate().getFullYear(),
+          ...serializedData,
+          // Handle specific degree date fields if they exist
+          startYear: data.startYear?.toDate ? data.startYear.toDate().getFullYear() : serializedData.startYear,
+          endYear: data.endYear?.toDate ? data.endYear.toDate().getFullYear() : serializedData.endYear,
         };
       });
       return degrees;
@@ -316,21 +507,6 @@ export const fetchUserDegrees = createAsyncThunk(
     }
   }
 );
-
-// export const fetchOnlyUserDegrees = createAsyncThunk(
-//   'user/fetchUserDegrees',
-//   async (uid, { rejectWithValue }) => {
-//     try {
-//       const querySnapshot = await getDocs(collection(FIREBASE_DB, 'degrees'));
-//       const degrees = querySnapshot.docs
-//         .filter(doc => doc.data().userId === uid)
-//         .map(doc => ({ id: doc.id, ...doc.data() }));
-//       return degrees;
-//     } catch (error) {
-//       return rejectWithValue(error.message);
-//     }
-//   }
-// );
 
 const initialState = {
   userEmail: "",
@@ -351,7 +527,7 @@ const initialState = {
   vFaculties: [],
   realtimeData: null,
   staff: [],
-  allUsers: [], // Add allUsers to the state,
+  allUsers: [],
 };
 
 const userSlice = createSlice({
@@ -371,11 +547,11 @@ const userSlice = createSlice({
       state.isLoading = false;
       state.bio = "";
       state.phone = "";
-      degrees = [];
+      state.degrees = [];
       state.professors = [];
       state.students = [];
       state.vFaculties = [];
-      state.allUsers = []; // Clear allUsers
+      state.allUsers = [];
     },
     setUser(state, action) {
       state.userEmail = action.payload.userEmail;
@@ -390,7 +566,7 @@ const userSlice = createSlice({
       })
       .addCase(fetchRealtimeData.fulfilled, (state, action) => {
         state.loading = false;
-        state.realtimeData = action.payload; // Update the state with the fetched data
+        state.realtimeData = action.payload;
       })
       .addCase(fetchRealtimeData.rejected, (state, action) => {
         state.loading = false;
@@ -412,6 +588,22 @@ const userSlice = createSlice({
         state.error = action.payload;
         state.isLoading = false;
       })
+      // Added uploadUserData reducer cases
+      .addCase(uploadUserData.pending, (state) => {
+        state.loading = true;
+        state.error = "";
+        state.isLoading = true;
+      })
+      .addCase(uploadUserData.fulfilled, (state, action) => {
+        state.loading = false;
+        state.isLoading = false;
+        // Optionally add success message handling
+      })
+      .addCase(uploadUserData.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload;
+        state.isLoading = false;
+      })
       .addCase(getUser.pending, (state) => {
         state.loading = true;
         state.error = "";
@@ -419,14 +611,17 @@ const userSlice = createSlice({
       })
       .addCase(getUser.fulfilled, (state, action) => {
         state.loading = false;
-        state.username = action.payload.username;
-        state.photoURL = action.payload.photoURL;
-        state.educationQualifications = action.payload.educationQualifications;
-        state.birthPlace = action.payload.birthPlace;
-        state.designation = action.payload.designation;
-        state.bio = action.payload.bio;
-        state.phone = action.payload.phone;
-        state.userEmail = action.payload.userEmail;
+        // Safely assign all user properties
+        const payload = action.payload;
+        state.username = payload.username || "";
+        state.photoURL = payload.photoURL || "";
+        state.educationQualifications = payload.educationQualifications || [];
+        state.birthPlace = payload.birthPlace || "";
+        state.designation = payload.designation || "";
+        state.bio = payload.bio || "";
+        state.phone = payload.phone || "";
+        state.userEmail = payload.userEmail || "";
+        state.uid = payload.uid || "";
         state.isLoading = false;
       })
       .addCase(getUser.rejected, (state, action) => {
@@ -435,8 +630,21 @@ const userSlice = createSlice({
         state.isLoading = false;
       })
       .addCase(deleteUser.fulfilled, (state, action) => {
+        // Remove from all relevant arrays
         state.professors = state.professors.filter(
           (professor) => professor.id !== action.payload
+        );
+        state.students = state.students.filter(
+          (student) => student.id !== action.payload
+        );
+        state.allUsers = state.allUsers.filter(
+          (user) => user.id !== action.payload
+        );
+        state.staff = state.staff.filter(
+          (staff) => staff.id !== action.payload
+        );
+        state.vFaculties = state.vFaculties.filter(
+          (faculty) => faculty.id !== action.payload
         );
       })
       .addCase(deleteUser.rejected, (state, action) => {
@@ -447,7 +655,13 @@ const userSlice = createSlice({
       })
       .addCase(updateUser.fulfilled, (state, action) => {
         state.isLoading = false;
-        Object.assign(state, action.payload);
+        // Safely update user properties
+        const payload = action.payload;
+        if (payload.username !== undefined) state.username = payload.username;
+        if (payload.photoURL !== undefined) state.photoURL = payload.photoURL;
+        if (payload.bio !== undefined) state.bio = payload.bio;
+        if (payload.phone !== undefined) state.phone = payload.phone;
+        if (payload.designation !== undefined) state.designation = payload.designation;
       })
       .addCase(updateUser.rejected, (state, action) => {
         state.isLoading = false;
@@ -491,6 +705,7 @@ const userSlice = createSlice({
       .addCase(getStaff.fulfilled, (state, action) => {
         state.loading = false;
         state.staff = action.payload;
+        state.isLoading = false;
       })
       .addCase(getStaff.rejected, (state, action) => {
         state.loading = false;
@@ -519,7 +734,7 @@ const userSlice = createSlice({
       })
       .addCase(getAllUsers.fulfilled, (state, action) => {
         state.loading = false;
-        state.allUsers = action.payload; // Update state with all users
+        state.allUsers = action.payload;
         state.isLoading = false;
       })
       .addCase(getAllUsers.rejected, (state, action) => {
@@ -534,7 +749,8 @@ const userSlice = createSlice({
       })
       .addCase(addUser.fulfilled, (state, action) => {
         state.loading = false;
-        state.allUsers = action.payload; // Update state with all users
+        // Add the new user to allUsers array
+        state.allUsers.push(action.payload);
         state.isLoading = false;
       })
       .addCase(addUser.rejected, (state, action) => {
@@ -543,7 +759,8 @@ const userSlice = createSlice({
         state.isLoading = false;
       })
       .addCase(addDegreeToUser.fulfilled, (state, action) => {
-        // Optionally handle the new degree in the state if necessary
+        // Add the new degree to degrees array
+        state.degrees.push(action.payload);
       })
       .addCase(addDegreeToUser.rejected, (state, action) => {
         state.error = action.payload;

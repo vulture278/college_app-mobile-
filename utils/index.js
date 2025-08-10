@@ -3,7 +3,7 @@ import { useSelector } from 'react-redux';
 
 export const AdminOnly = ({ children }) => {
 const {designation, uid} = useSelector((state) => state.user);
-  if (designation === 'Admin') {
+  if (["Professor", "Visiting Faculty", "Assistant Professor", "Admin"].includes(designation)) {
     return <>{children}</>;
   }
   return null;

@@ -45,6 +45,10 @@ import AddEvent from "./pages/AddEvent";
 import { useSelector } from "react-redux";
 import EventsScreen from "./pages/EventScreen";
 import NoticesScreen from "./pages/NoticeScreen";
+import AdminUserManagement from "./pages/AdminUserManagement";
+import ExcelUserUpload from "./pages/ExcelUserUpload";
+import AdminDashboardNew from "./pages/AdminDashboardNew";
+import ProfessorAuthentication from "./pages/ProfessorAuthentication";
 
 const Stack = createStackNavigator();
 
@@ -95,6 +99,7 @@ const AppStack = ({navigation}) => {
       />
       <Stack.Screen name="UserSecurity" component={UserSecurity} />
       <Stack.Screen name="AdminDashboard" component={AdminDashboard} />
+      <Stack.Screen name="AdminDashboardNew" component={AdminDashboardNew} />
       <Stack.Screen name="AddProfessor" component={AddProfessor} />
       <Stack.Screen name="AddStudent" component={AddStudent} />
       <Stack.Screen name="AddVF" component={AddVF} />
@@ -121,6 +126,9 @@ const AppStack = ({navigation}) => {
       <Stack.Screen name="Notification" component={Notification} />
       <Stack.Screen name="Notice" component={NoticesScreen} />
       <Stack.Screen name="ShowDegrees" component={ShowDegrees} />
+      <Stack.Screen name="AddAdminUsers" component={AdminUserManagement} />
+      <Stack.Screen name="ExcelUserUpload" component={ExcelUserUpload} />
+      <Stack.Screen name="ProfessorAuthentication" component={ProfessorAuthentication} />
       
     </Stack.Navigator>
   );

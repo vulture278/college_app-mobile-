@@ -94,6 +94,7 @@ const MainPage = ({ navigation }) => {
             <Text style={styles.highlightedText}>Announcements</Text>
           </Pressable>
           <Pressable style={styles.highlightedCard} onPress={() => navigation.navigate('Contacts')}>
+          {/* <Pressable style={styles.highlightedCard} onPress={() => navigation.navigate('ExcelUserUpload')}> */}
             <Icon name="phone" size={30} color="#00796b" />
             <Text style={styles.highlightedText}>Contacts</Text>
           </Pressable>

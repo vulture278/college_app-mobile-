@@ -91,12 +91,12 @@ const Sidebar = (props) => {
           </Pressable>
 
           {/* <AdminOnly> */}
-            <PermissionOnly>
-          <Pressable style={styles.menuItem} onPress={() => navigation.navigate('AdminDashboard')}>
+          {/* <PermissionOnly> */}
+          <Pressable style={styles.menuItem} onPress={() => navigation.navigate('AdminDashboardNew')}>
             <Icon name="tachometer-alt" size={20} color="#00796b" />
             <Text style={styles.menuItemText}>Dashboard</Text>
           </Pressable>
-          </PermissionOnly>
+          {/* </PermissionOnly> */}
 
           
           {/* </AdminOnly> */}
